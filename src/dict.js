@@ -356,6 +356,7 @@ const safeGlobalDict = {
 
     // ── Composer modes ──
     "Plan, search, make edits, run commands": "规划、搜索、编辑并运行命令",
+    "Plan, search, build anything": "规划、搜索、构建任何内容",
     "Coordinate long-horizon tasks with delegated subagents": "通过委派子智能体协调长期任务",
     "Create detailed plans for accomplishing tasks": "为完成任务创建详细计划",
     "Create structured plans with implementation steps": "创建包含实现步骤的结构化计划",
@@ -417,7 +418,23 @@ const safeGlobalDict = {
     "Nightly builds will silently download and install updates without prompting you.": "每夜版本将静默下载并安装更新，不会提示您。",
     "Keybinding: editor.action.inlineSuggest.acceptNextWord": "快捷键: editor.action.inlineSuggest.acceptNextWord",
     "Keybinding: ": "快捷键: ",
-    "Keybinding:": "快捷键:"
+    "Keybinding:": "快捷键:",
+
+    // ── Agent 面板、标签页菜单与搜索弹窗 ──
+    "New Agent": "新建智能体",
+    "Toggle Chat Pane": "切换聊天面板",
+    "Maximize Chat": "最大化聊天",
+    "Close Tab": "关闭标签页",
+    "Close Other Tabs": "关闭其他标签页",
+    "Close All Tabs": "关闭所有标签页",
+    "Open Tab as Editor": "在编辑器中打开标签页",
+    "Export Transcript": "导出对话记录",
+    "Copy Request ID": "复制请求 ID",
+    "Agent Settings": "智能体设置",
+    "Search Agents...": "搜索智能体...",
+    "Search Agents…": "搜索智能体…",
+    "No matching agents": "未找到匹配的智能体",
+    "Archived": "已归档"
 };
 
 const riskyShortWords = {

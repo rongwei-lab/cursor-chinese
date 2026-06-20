@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1 - 2026-06-20
+
+### 修复
+
+- 补充 Agent 面板顶部 `New Agent` 的汉化。
+- 补充聊天标签页更多菜单汉化，包括切换聊天面板、最大化聊天、关闭标签页、导出对话记录、复制请求 ID 和智能体设置等菜单项。
+- 补充 Agent 搜索弹窗汉化，包括 `Search Agents...`、`No matching agents` 和 `Archived`。
+- 补充输入框提示 `Plan, search, build anything` 及其悬浮提示汉化。
+
 ## 1.0.0 - 2026-06-20
 
 首次正式发布 `cursor chinese`。

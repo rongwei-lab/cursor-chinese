@@ -1,6 +1,6 @@
 {
   "name": "cursor-chinese",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "cursor chinese — Cursor 编辑器一键汉化工具",
   "main": "index.js",
   "bin": {
