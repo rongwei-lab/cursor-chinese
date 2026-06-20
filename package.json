@@ -1,0 +1,35 @@
+{
+  "name": "cursor-chinese",
+  "version": "1.0.0",
+  "description": "cursor chinese — Cursor 编辑器一键汉化工具",
+  "main": "index.js",
+  "bin": {
+    "cursor-chinese": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "build": "pkg . --out-path dist --targets node18-win-x64,node18-macos-x64,node18-macos-arm64,node18-linux-x64,node18-linux-arm64 --no-bytecode --public-packages \"*\"",
+    "build:win": "pkg . --out-path dist --targets node18-win-x64 --no-bytecode --public-packages \"*\"",
+    "build:mac": "pkg . --out-path dist --targets node18-macos-x64,node18-macos-arm64 --no-bytecode --public-packages \"*\"",
+    "build:linux": "pkg . --out-path dist --targets node18-linux-x64,node18-linux-arm64 --no-bytecode --public-packages \"*\""
+  },
+  "pkg": {
+    "targets": [
+      "node18-win-x64",
+      "node18-macos-x64",
+      "node18-macos-arm64",
+      "node18-linux-x64",
+      "node18-linux-arm64"
+    ],
+    "outputPath": "dist"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "inquirer": "^8.2.6",
+    "sudo-prompt": "^9.2.1"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^5.15.0"
+  },
+  "license": "MIT"
+}
