@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3 - 2026-06-21
+
+### 改进
+
+- 调整终端启动界面风格，移除调侃式 Banner 和菜单文案。
+- 将交互菜单简化为 `一键汉化`、`恢复英文` 和 `退出`。
+- 补充 Rules、Skills、Subagents、Commands 二级菜单的空状态、加载失败、表单占位、保存按钮和错误提示汉化。
+- 补充压缩资源中的 Rules 空状态兜底替换，覆盖 `No Rules Yet`、`Create rules to guide Agent behavior` 和 `New User Rule` 等未汉化文案。
+- 重新生成 Windows、macOS、Linux x64 和 Linux arm64 成品。
+
 ## 1.0.2 - 2026-06-21
 
 ### 改进

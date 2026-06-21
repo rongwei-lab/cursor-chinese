@@ -223,10 +223,9 @@ async function runSilent(action) {
 
 async function runInteractive() {
     console.log('');
-    console.log(chalk.gray('  ┌──────────────────────────────────────┐'));
-    console.log(chalk.gray('  │ ') + chalk.red('♥') + chalk.white(' ♠') + chalk.red(' ♦') + chalk.white(' ♣') + chalk.bold.white(' cursor chinese ') + chalk.white('♣') + chalk.red(' ♦') + chalk.white(' ♠') + chalk.red(' ♥') + chalk.gray('      │'));
-    console.log(chalk.gray('  │') + chalk.yellow('     🂡 All in 完美汉化，梭哈！🂡  ') + chalk.gray('     │'));
-    console.log(chalk.gray('  └──────────────────────────────────────┘'));
+    console.log(chalk.cyan.bold('  cursor chinese'));
+    console.log(chalk.gray('  Cursor 本地汉化工具 · 一键汉化 / 随时还原'));
+    console.log(chalk.gray('  ──────────────────────────────────────'));
     console.log('');
 
     const paths = await obtainCursorPaths();
@@ -242,10 +241,10 @@ async function runInteractive() {
         {
             type: 'list',
             name: 'action',
-            message: chalk.white.bold('请选择你的策略：'),
+            message: chalk.white.bold('请选择操作：'),
             choices: [
-                { name: chalk.green('🚀  一键汉化 ———— 拿你价值'), value: 'translate' },
-                { name: chalk.yellow('⏪ 恢复英文 ————— 我要验牌'), value: 'restore' },
+                { name: chalk.green('🚀 一键汉化'), value: 'translate' },
+                { name: chalk.yellow('⏪ 恢复英文'), value: 'restore' },
                 new inquirer.Separator(),
                 { name: chalk.gray('❌ 退出'), value: 'exit' },
             ],
