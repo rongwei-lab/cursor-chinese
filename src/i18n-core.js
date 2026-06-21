@@ -65,6 +65,139 @@ const riskyRegexes = Object.entries(riskyShortWords).map(([en, zh]) => {
     };
 });
 
+// ═══════════════════════════════════════════════
+// 终端进度展示
+// ═══════════════════════════════════════════════
+
+const PROGRESS_BAR_WIDTH = 24;
+
+/**
+ * 压缩并截断终端展示文本，避免正在替换的长模板撑满整行。
+ * 这里保留“正在改什么”的关键信息，详细命中数量会在处理结束后汇总。
+ */
+function compactText(value, maxLength = 72) {
+    const compact = String(value)
+        .replace(/\s+/g, ' ')
+        .replace(/\n/g, ' ')
+        .trim();
+    const chars = Array.from(compact);
+    if (chars.length <= maxLength) return compact;
+    return chars.slice(0, maxLength - 1).join('') + '…';
+}
+
+function formatReplacementDetail(from, to, count) {
+    const suffix = count > 0 ? `（${count} 处）` : '';
+    return `${compactText(from, 30)} → ${compactText(to, 30)}${suffix}`;
+}
+
+/**
+ * 轻量进度条：TTY 下原地刷新，非 TTY 下只输出阶段完成行。
+ * 这样既适合截图里的交互终端，也不会在日志文件里刷出大量重复行。
+ */
+function createProgress(totalPhases) {
+    let current = 0;
+    const isTTY = Boolean(process.stdout.isTTY);
+
+    const render = (label, detail = '') => {
+        const percent = Math.min(100, Math.round((current / totalPhases) * 100));
+        const filled = Math.round((percent / 100) * PROGRESS_BAR_WIDTH);
+        const bar = '█'.repeat(filled) + '░'.repeat(PROGRESS_BAR_WIDTH - filled);
+        const line = `  [${bar}] ${String(percent).padStart(3)}% ${label}${detail ? `：${compactText(detail)}` : ''}`;
+
+        if (isTTY) {
+            process.stdout.write(`\r\x1b[K${line}`);
+        } else if (current > 0) {
+            console.log(line);
+        }
+    };
+
+    return {
+        update(label, detail) {
+            if (isTTY) render(label, detail);
+        },
+        step(label, detail) {
+            current = Math.min(totalPhases, current + 1);
+            render(label, detail);
+        },
+        finish(label, detail) {
+            current = totalPhases;
+            render(label, detail);
+            process.stdout.write('\n');
+        },
+    };
+}
+
+function applyReplacementString(template, args) {
+    return template.replace(/\$(\d+)/g, (match, index) => {
+        const value = args[Number(index)];
+        return value === undefined ? match : value;
+    });
+}
+
+function replaceRegexWithCount(content, regex, replacement) {
+    let count = 0;
+    const nextContent = content.replace(regex, (...args) => {
+        count++;
+        if (typeof replacement === 'function') {
+            return replacement(...args);
+        }
+        return applyReplacementString(replacement, args);
+    });
+    return { content: nextContent, count };
+}
+
+function countStringOccurrences(content, needle) {
+    if (!needle) return 0;
+
+    let count = 0;
+    let index = 0;
+    while ((index = content.indexOf(needle, index)) !== -1) {
+        count++;
+        index += needle.length;
+    }
+    return count;
+}
+
+function replaceStringWithCount(content, search, replacement) {
+    const count = countStringOccurrences(content, search);
+    if (count === 0) return { content, count };
+    return { content: content.split(search).join(replacement), count };
+}
+
+function createChangeTracker(maxSamples = 12) {
+    const groupCounts = new Map();
+    const samples = [];
+
+    return {
+        record(group, from, to, count) {
+            if (count <= 0) return;
+
+            groupCounts.set(group, (groupCounts.get(group) || 0) + count);
+            if (samples.length < maxSamples) {
+                samples.push({ group, from, to, count });
+            }
+        },
+        print() {
+            const total = [...groupCounts.values()].reduce((sum, count) => sum + count, 0);
+            console.log(`  ✅ 汉化替换完成，共修改 ${total} 处。`);
+
+            if (groupCounts.size > 0) {
+                console.log('  🧾 修改内容摘要：');
+                for (const [group, count] of groupCounts.entries()) {
+                    console.log(`    - ${group}: ${count} 处`);
+                }
+            }
+
+            if (samples.length > 0) {
+                console.log('  🔎 本次命中的部分内容：');
+                samples.forEach(({ group, from, to, count }) => {
+                    console.log(`    - ${group}: ${formatReplacementDetail(from, to, count)}`);
+                });
+            }
+        },
+    };
+}
+
 
 // ═══════════════════════════════════════════════
 // 备份与还原
@@ -72,13 +205,14 @@ const riskyRegexes = Object.entries(riskyShortWords).map(([en, zh]) => {
 
 function backupFile(filePath) {
     const backupPath = filePath + '.backup';
+    const fileName = path.basename(filePath);
     if (fs.existsSync(backupPath)) {
         // 已有备份 → 保留当前文件，避免重复汉化时覆盖现有补丁
-        return '🧩 已发现原版备份，保留当前文件继续汉化';
+        return `🧩 ${fileName}: 已发现原版备份，保留当前文件继续汉化`;
     } else if (fs.existsSync(filePath)) {
         // 首次运行 → 创建备份
         fs.copyFileSync(filePath, backupPath);
-        return '💾 已备份纯净原版文件 ———— 正在洗牌';
+        return `💾 ${fileName}: 已备份纯净原版文件`;
     }
     return null;
 }
@@ -237,83 +371,30 @@ function translate(paths) {
     // 2. 读取核心 JS
     console.log('\n⚙️  正在读取并处理核心代码...');
     let jsContent = fs.readFileSync(mainJsPath, 'utf8');
-
-    const jokes = [
-        "诺导指着满屏红字问蜗牛，蜗牛说这是给代码加的除夕皮肤。",
-        "蓉蓉问苗苗这Bug怎么复现，苗苗推了推眼镜：“看缘分。”",
-        "发总发了个大红包，海洋只抢到一分钱，表示要加班到天亮。",
-        "杨书记开会抓摸鱼，结果前排的木木文已经抱着抱枕睡熟了。",
-        "帅气飞对电脑深情发誓，只要不报错什么都行。系统弹了俩Warning。",
-        "海洋写了个邮件自动回复，结果和木木文的脚本硬核对聊了一整夜。",
-        "发总夸蓉蓉看电脑的眼神很专注，蓉蓉弱弱说：“发总，电脑死机了。”",
-        "苗苗和帅气飞打赌修Bug，杨书记路过重启了服务器，Bug全没了。",
-        "蜗牛把删库脚本交了上去，诺导看后连夜买站票逃离了这座城市。",
-        "海洋跟发总申请买双屏，说是为了左边摸鱼右边看代码更高效。",
-        "帅气飞把bug说成“不影响使用的特性”，被木木文追着打了三条街。",
-        "蓉蓉以为自己写了个完美递归，结果把杨书记的机器终于跑死机了。",
-        "苗苗的注释写得比代码还长，诺导看了直呼好一篇长篇短篇小说。",
-        "发总问大家进度如何，蜗牛指着屏幕：“在建文件夹了，很快！”",
-        "木木文声称自己掌握了面向运气编程，只要不报错那就是成功。",
-        "诺导让海洋优化内存，海洋直接把功能删了：不运行就不会占内存。",
-        "蓉蓉给变量起名a1、a2，帅气飞看源码时差点当场超度上西天了。",
-        "杨书记提议大家早睡早起，凌晨三点发现苗苗还在偷偷提交代码。",
-        "发总视察打卡记录，惊觉蜗牛为了改Bug已经连续三天睡在公司了。",
-        "木木文的代码像是一杯意面上全是结，诺导顺着找Bug找进医院了。",
-        "帅气飞用玄学修好了Bug，别人问怎么弄的，他说：“重启治百病。”",
-        "蓉蓉发现了一个严重的漏洞，海洋看了一眼说：“没事，那叫彩蛋。”",
-        "苗苗问蜗牛借个键盘，蜗牛拿出一个所有键位都被磨平的无字天书。",
-        "杨书记为了团建让大家提建议，木木文建议大家周末一起熬夜改Bug。",
-        "诺导试图理解帅气飞的代码逻辑链路，最终大脑CPU过载直接冒烟了。",
-        "发总给大家发年终奖，海洋一打开，里面是一张“明年继续努力”的贺卡。",
-        "蜗牛把测试环境配崩了无故触发警报，蓉蓉以为停电可以提前下班了。",
-        "木木文的屏幕倒转过来看代码，声称是为了转换一下思考问题的角度。",
-        "帅气飞写的接口延迟高达10秒，他解释说这叫“让用户有一点期待感”。",
-        "苗苗一行代码解决核心问题，杨书记拍手叫绝，结果发现连的是测试库。"
-    ];
-    let lastJokeTime = Date.now();
-    // 洗牌函数（Fisher-Yates）
-    function shuffleArray(arr) {
-        for (let i = arr.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [arr[i], arr[j]] = [arr[j], arr[i]];
-        }
-        return arr;
-    }
-    let shuffledJokes = shuffleArray([...jokes]);
-    let jokeIndex = 0;
-    function printJoke() {
-        const now = Date.now();
-        if (now - lastJokeTime > 3000) {
-            if (jokeIndex >= shuffledJokes.length) {
-                shuffledJokes = shuffleArray([...jokes]);
-                jokeIndex = 0;
-            }
-            // 将文本限制在较短的范围，防止终端因为宽度不够自动换行产生多行
-            process.stdout.write(`\r\x1b[K  📢 摸鱼小剧场: ${shuffledJokes[jokeIndex]}`);
-            jokeIndex++;
-            lastJokeTime = now;
-        }
-    }
+    const progress = createProgress(6);
+    const changes = createChangeTracker();
+    progress.update('准备汉化词库', '正在扫描可替换文本');
 
     // 3. 安全长句：单次大正则替换
     jsContent = jsContent.replace(safeMegaRegex, (match, quote, en) => {
-        printJoke();
+        changes.record('安全长句', en, safeGlobalDict[en], 1);
+        progress.update('替换安全长句', formatReplacementDetail(en, safeGlobalDict[en], 1));
         return `${quote}${safeGlobalDict[en]}${quote}`;
     });
+    progress.step('安全长句替换完成');
 
     // 4. 长句裸文本替换
     if (longMegaRegex) {
         jsContent = jsContent.replace(longMegaRegex, (match, en) => {
-            printJoke();
+            changes.record('裸文本长句', en, safeGlobalDict[en], 1);
+            progress.update('替换裸文本长句', formatReplacementDetail(en, safeGlobalDict[en], 1));
             return safeGlobalDict[en];
         });
     }
+    progress.step('裸文本长句处理完成');
 
-    process.stdout.write('\n'); // 换行保留最后一句笑话
-
-    // 5. 含内嵌引号和特殊Unicode转义的词条
     // 5. 暴力正则破译：处理带标点、特殊转义、单双引号混用的顽固长句
-    console.log('  🔍 正在处理包含特殊符号的顽固词条...');
+    progress.update('处理顽固词条', '包含特殊符号、动态模板和 Unicode 转义');
     const trickyReplacements = [
         {
             // 攻克 1：Reset "Don't Ask Again" Dialogs 
@@ -445,9 +526,17 @@ function translate(paths) {
     ];
 
     trickyReplacements.forEach(({ regex, zh }) => {
-        printJoke();
-        jsContent = jsContent.replace(regex, zh);
+        const before = jsContent;
+        const result = replaceRegexWithCount(jsContent, regex, zh);
+        jsContent = result.content;
+        changes.record('顽固词条', regex.source, zh, result.count);
+        if (result.count > 0) {
+            progress.update('替换顽固词条', formatReplacementDetail(regex.source, zh, result.count));
+        } else if (before !== jsContent) {
+            progress.update('替换顽固词条', compactText(regex.source));
+        }
     });
+    progress.step('顽固词条处理完成');
 
     // 5.1 设置侧边栏映射与部分编译模板片段
     const scopedReplacements = [
@@ -545,6 +634,17 @@ function translate(paths) {
         ['label:"Inherit from parent"', 'label:"继承父级设置"'],
         ['label:"Auto-Run in Sandbox"', 'label:"在沙盒中自动运行"'],
         ['label:"Run Everything (Unsandboxed)"', 'label:"运行所有（非沙盒）"'],
+        ['title:"Approvals & Execution for commands, MCP and more"', 'title:"命令、MCP 等审批与执行"'],
+        ['children:"Approvals & Execution for commands, MCP and more"', 'children:"命令、MCP 等审批与执行"'],
+        ['label:"Run Mode"', 'label:"运行模式"'],
+        ['title:"Run Mode"', 'title:"运行模式"'],
+        ['children:"Run Mode"', 'children:"运行模式"'],
+        ['description:"Choose how Agents run tools like command execution, MCP, and file writes."', 'description:"选择智能体如何运行命令执行、MCP 和文件写入等工具。"'],
+        ['children:"Commands that are allowlisted will run automatically."', 'children:"列入白名单的命令将自动运行。"'],
+        ['label:"Allowlist"', 'label:"白名单"'],
+        ['children:"Allowlist"', 'children:"白名单"'],
+        ['title:"Learn more"', 'title:"了解更多"'],
+        ['children:"Learn more"', 'children:"了解更多"'],
         ['return"Auto-Run in Sandbox"', 'return"在沙盒中自动运行"'],
         ['return"Run Everything (Unsandboxed)"', 'return"运行所有（非沙盒）"'],
         ['return"Ask for permission before running each operation"', 'return"每次操作前请求许可"'],
@@ -721,14 +821,22 @@ function translate(paths) {
     ];
 
     scopedReplacements.forEach(([en, zh]) => {
-        printJoke();
-        jsContent = jsContent.split(en).join(zh);
+        const result = replaceStringWithCount(jsContent, en, zh);
+        jsContent = result.content;
+        changes.record('界面片段', en, zh, result.count);
+        if (result.count > 0) {
+            progress.update('替换界面片段', formatReplacementDetail(en, zh, result.count));
+        }
     });
+    progress.step('界面片段处理完成');
 
-    jsContent = jsContent.replace(
+    const worktreeCountResult = replaceRegexWithCount(
+        jsContent,
         /`\$\{d\.length\} worktree\$\{d\.length===1\?"":"s"\}`/g,
         '`${d.length} 个工作树`'
     );
+    jsContent = worktreeCountResult.content;
+    changes.record('动态模板', '`${d.length} worktree${d.length===1?"":"s"}`', '`${d.length} 个工作树`', worktreeCountResult.count);
     // jsContent = jsContent.split('"Reset \\"Don\'t Ask Again\\" Dialogs"').join('"重置\\"不再询问\\"弹窗"');
     // jsContent = jsContent.split("'Reset \"Don\\'t Ask Again\" Dialogs'").join("'重置\"不再询问\"弹窗'");
     // jsContent = jsContent.split('label:\'Reset "Don\\u2019t Ask Again" Dialogs\'').join('label:\'重置“不再询问”弹窗\'');
@@ -737,21 +845,29 @@ function translate(paths) {
     // jsContent = jsContent.split('description:\'You haven\\u2019t marked any dialogs as "Don\\u2019t ask again". Any hidden dialogs will appear here to manage.\'').join('description:\'您尚未将任何弹窗标记为“不再询问”。任何隐藏的弹窗都将显示在此处以供管理。\'');
 
     // 6. 危险短词：精准 UI 属性替换（跳过键盘扫描表等键位元数据）
+    progress.update('处理短词', '仅替换可见 UI 属性，跳过键盘扫描表');
     for (const { en, zh, propRegex, jsxRegex, htmlRegex } of riskyRegexes) {
-        printJoke();
-        const guard = (regex, build) => {
+        const guard = (group, regex, build) => {
+            let count = 0;
             jsContent = jsContent.replace(regex, (...args) => {
                 const offset = args[args.length - 2];
                 if (isProtectedKeybindingContext(jsContent, offset, en)) return args[0];
+                count++;
                 return build(...args);
             });
+            changes.record(group, en, zh, count);
+            if (count > 0) {
+                progress.update('替换短词', formatReplacementDetail(en, zh, count));
+            }
         };
-        guard(propRegex, (_, p1, p2) => `${p1}: ${p2}${zh}${p2}`);
-        guard(jsxRegex, (_, p1, p2) => `${p1}, ${p2}${zh}${p2}`);
-        guard(htmlRegex, () => `>${zh}<`);
+        guard('UI 属性短词', propRegex, (_, p1, p2) => `${p1}: ${p2}${zh}${p2}`);
+        guard('JSX 文本短词', jsxRegex, (_, p1, p2) => `${p1}, ${p2}${zh}${p2}`);
+        guard('HTML 文本短词', htmlRegex, () => `>${zh}<`);
     }
+    progress.step('短词处理完成');
 
-    process.stdout.write('\n'); // 收尾换行
+    progress.finish('核心代码处理完成');
+    changes.print();
 
     // 7. 写回（Program Files 等目录下避免写后立刻读盘失败）
     try {
