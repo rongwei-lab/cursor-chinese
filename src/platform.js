@@ -296,7 +296,7 @@ function resolveCursorPath(options = {}) {
     if (cliPath) {
         const appPath = normalizeToAppPath(cliPath);
         if (appPath) {
-            saveConfig({ cursorAppPath: appPath });
+            // --cursor-path 常用于提权子进程和一次性测试，不能覆盖用户已保存的安装位置。
             return buildPathsFromAppPath(appPath);
         }
         return null;

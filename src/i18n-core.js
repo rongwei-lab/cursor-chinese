@@ -349,9 +349,54 @@ function fixMacGatekeeper(appPath) {
     }
 }
 
+// Cursor 3.14 将部分设置短词作为控件属性直接写进两个工作台 bundle。
+// 只匹配 label/title 等可见字段，避免把 Startup、Preview 一类短词替换进内部逻辑。
+const settingsControlReplacements = [
+    ['section:"Browser"', 'section:"浏览器"'],
+    ['label:"Cloud"', 'label:"云端"'],
+    ['label:"Workspace"', 'label:"工作区"'],
+    ['label:"Small"', 'label:"小"'],
+    ['label:"Default"', 'label:"默认"'],
+    ['label:"Large"', 'label:"大"'],
+    ['return"Small"', 'return"小"'],
+    ['return"Default"', 'return"默认"'],
+    ['return"Large"', 'return"大"'],
+    ['title:"Terminal and Editing"', 'title:"终端与编辑"'],
+    ['accessibleLabel:"Terminal and Editing"', 'accessibleLabel:"终端与编辑"'],
+    ['accessibleLabel:"Third-Party Imports"', 'accessibleLabel:"第三方导入"'],
+    ['label:"Conversation Density"', 'label:"对话密度"'],
+    ['label:"Compact"', 'label:"紧凑"'],
+    ['label:"Balanced"', 'label:"均衡"'],
+    ['label:"Detailed"', 'label:"详细"'],
+    ['label:"Auto-Hide Editor When Empty"', 'label:"编辑器为空时自动隐藏"'],
+    ['label:"Open Chat as Editor Tabs"', 'label:"将聊天作为编辑器标签页打开"'],
+    ['title:"Startup"', 'title:"启动"'],
+    ['label:"Tips"', 'label:"提示"'],
+    ['label:"Window Restoration"', 'label:"窗口恢复"'],
+    ['label:"Agent Window"', 'label:"智能体窗口"'],
+    ['label:"Last Used Windows"', 'label:"上次使用的窗口"'],
+    ['label:"Send After Current Message"', 'label:"当前消息完成后发送"'],
+    ['label:"Send Right Away"', 'label:"立即发送"'],
+    ['title:"Choose Custom Sound..."', 'title:"选择自定义提示音..."'],
+    ['title:"Select Custom Chime Sound"', 'title:"选择自定义提示音"'],
+    ['title:"Preview"', 'title:"预览"'],
+    ['"Default Sound"', '"默认提示音"'],
+    ['name:"All Files"', 'name:"所有文件"'],
+    ['label:"Auto-Run on Agent Finish"', 'label:"智能体完成后自动运行审查"'],
+    ['title:"Remote Control"', 'title:"远程控制"'],
+    ['label:"Remote Control"', 'label:"远程控制"'],
+    ['inlineLabel:"Remote Control"', 'inlineLabel:"远程控制"'],
+    ['tooltip:"Remote Control Agent"', 'tooltip:"远程控制智能体"'],
+    ['qualifierSuffix:"Remote Control"', 'qualifierSuffix:"远程控制"'],
+    ['label:"Keep This Computer Awake"', 'label:"保持此电脑唤醒"'],
+    ['title:"Extension Security"', 'title:"扩展安全"'],
+    ['label:"Verify Extension Signatures"', 'label:"验证扩展签名"'],
+];
+
 // Glass / Agent 独立 bundle 中常见的新版 UI 片段。
 // 这些替换只在附加 JS 文件里执行，避免为了新窗口文案扩大 desktop 主文件的短词替换面。
 const auxiliaryInterfaceReplacements = [
+    ...settingsControlReplacements,
     ['general:"General"', 'general:"通用"'],
     ['profile:"Profile"', 'profile:"个人资料"'],
     ['appearance:"Appearance"', 'appearance:"外观"'],
@@ -569,7 +614,28 @@ const auxiliaryInterfaceReplacements = [
     ['title:"Configure Ignored Files"', 'title:"配置忽略文件"'],
 ];
 
+// Cursor 3.15 的设置页将部分说明编译为模板字符串，desktop 与 Glass 共用这些规则。
+const cursor315DynamicReplacements = [
+    {
+        regex: /(\$\{[^}]+\})\s+submits\s+chat,\s+Enter\s+inserts\s+a\s+newline,\s+and\s+primary\s+actions\s+move\s+to\s+(\$\{[^}]+\})/g,
+        zh: '$1 提交聊天，Enter 插入换行，主要操作移至 $2',
+    },
+    {
+        regex: /`Choose\s+\$\{([^}]+)\}\s+for\s+pull\s+request\s+links\s+on\s+web\s+and\s+desktop`/g,
+        zh: '`选择 ${$1} 作为网页和桌面端拉取请求链接的打开方式`',
+    },
+    {
+        regex: /`Apply\s+\.cursorignore\s+files\s+to\s+all\s+subdirectories(\$\{[^}]+\})?\.\s*Changing\s+this\s+setting\s+requires\s+restarting\s+Cursor\.`/gi,
+        zh: '`将 .cursorignore 文件应用到所有子目录$1。更改此设置需要重启 Cursor。`',
+    },
+    {
+        regex: /`Use\s+with\s+caution\.\s*Skip\s+symlinks\s+during\s+\.cursorignore\s+file\s+discovery\.\s*Enable\s+only\s+when\s+all\s+\.cursorignore\s+files\s+are\s+reachable\s+without\s+symlinks(\$\{[^}]+\})?\.\s*Changing\s+this\s+setting\s+requires\s+restarting\s+Cursor\.`/gi,
+        zh: '`谨慎使用。在查找 .cursorignore 文件时跳过符号链接。仅当无需符号链接即可访问所有 .cursorignore 文件时才启用$1。更改此设置需要重启 Cursor。`',
+    },
+];
+
 const auxiliaryRegexReplacements = [
+    ...cursor315DynamicReplacements,
     {
         regex: /Submit\s+with\s+(\$\{[^}]+\}|\\u2318\s*\+\s*|⌘\s*\+\s*|Ctrl\s*\+\s*)Enter/gi,
         zh: '使用 $1Enter 提交',
@@ -799,6 +865,7 @@ function translate(paths) {
     // 5. 暴力正则破译：处理带标点、特殊转义、单双引号混用的顽固长句
     progress.update('处理顽固词条', '包含特殊符号、动态模板和 Unicode 转义');
     const trickyReplacements = [
+        ...cursor315DynamicReplacements,
         {
             // 攻克 1：Reset "Don't Ask Again" Dialogs 
             // 魔法解析：(?:'|\\'|\\u2019|’|&#39;) 涵盖了前端所有的单引号变体，(?:\\?["']|\\u0022|&quot;) 兼容所有双引号变体
@@ -1012,6 +1079,7 @@ function translate(paths) {
 
     // 5.1 设置侧边栏映射与部分编译模板片段
     const scopedReplacements = [
+        ...settingsControlReplacements,
         ['general:"General"', 'general:"通用"'],
         ['profile:"Profile"', 'profile:"个人资料"'],
         ['appearance:"Appearance"', 'appearance:"外观"'],
