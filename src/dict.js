@@ -918,6 +918,9 @@ const safeGlobalDict = {
     "Open in New Window": "在新窗口中打开",
     "Import from Editor Window": "从编辑器窗口导入",
     "Open New Agent Chat": "打开新智能体聊天",
+    "New Terminal": "新建终端",
+    "New Browser": "新建浏览器",
+    "Open IDE": "打开 IDE",
     "New Agent in Project": "在项目中新建智能体",
     "New Agent with Model": "使用模型新建智能体",
     "New Agent with Query": "使用查询新建智能体",
@@ -1025,6 +1028,7 @@ const nativeNlsDict = {
     "Run": "运行",
     "Terminal": "终端",
     "Help": "帮助",
+    "Exit": "退出",
     "Default": "默认",
     "Loading...": "正在加载...",
 };

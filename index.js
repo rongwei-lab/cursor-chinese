@@ -14,11 +14,15 @@
  *        → 无权限：通过 sudo-prompt 以管理员身份重拉自身，追加 --action 参数
  */
 
+const fs = require('fs');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
+const path = require('path');
+const { version: PACKAGE_VERSION } = require('./package.json');
 const {
     resolveCursorPath,
     parseCursorPathArg,
+    findRunningCursorAppPaths,
     findAllCursorCandidates,
     normalizeToAppPath,
     buildPathsFromAppPath,
@@ -75,9 +79,27 @@ async function promptManualPath() {
             },
         },
     ]);
-    const appPath = normalizeToAppPath(manualPath.trim());
+    const appPath = normalizeToAppPath(typeof manualPath === 'string' ? manualPath.trim() : '');
+    if (!appPath) {
+        console.log(chalk.red('  ❌ 输入的 Cursor 路径已无效，请重新选择。'));
+        return null;
+    }
     saveConfig({ cursorAppPath: appPath });
     return buildPathsFromAppPath(appPath);
+}
+
+function sameCursorAppPath(left, right) {
+    if (!left || !right) return false;
+
+    try {
+        const normalizedLeft = path.resolve(left);
+        const normalizedRight = path.resolve(right);
+        return process.platform === 'win32'
+            ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+            : normalizedLeft === normalizedRight;
+    } catch {
+        return false;
+    }
 }
 
 async function promptSelectPath(candidates, preselected) {
@@ -97,21 +119,152 @@ async function promptSelectPath(candidates, preselected) {
         value: '__rescan__',
     });
 
+    const defaultCandidate = preselected
+        ? candidates.find(candidate => sameCursorAppPath(candidate, preselected))
+        : undefined;
+
     const { selected } = await inquirer.prompt([
         {
             type: 'list',
             name: 'selected',
             message: chalk.white.bold('检测到多个 Cursor 安装，请选择：'),
             choices,
-            default: preselected && candidates.includes(preselected) ? preselected : 0,
+            default: defaultCandidate || 0,
         },
     ]);
 
     if (selected === '__manual__') return promptManualPath();
     if (selected === '__rescan__') return obtainCursorPaths({ forceRescan: true });
 
-    saveConfig({ cursorAppPath: selected });
-    return buildPathsFromAppPath(selected);
+    const appPath = normalizeToAppPath(selected);
+    if (!appPath) {
+        console.log(chalk.red('  ❌ 所选 Cursor 路径已无效，请重新选择。'));
+        return null;
+    }
+
+    saveConfig({ cursorAppPath: appPath });
+    return buildPathsFromAppPath(appPath);
+}
+
+function collectMutableFilePaths(paths) {
+    const candidates = [
+        paths.htmlPath,
+        paths.mainJsPath,
+        paths.glassJsPath,
+        paths.nlsMessagesPath,
+        ...(Array.isArray(paths.languagePackNlsMessagesPaths)
+            ? paths.languagePackNlsMessagesPaths
+            : []),
+        paths.productJsonPath,
+    ];
+    const seen = new Set();
+
+    return candidates.filter((filePath) => {
+        if (typeof filePath !== 'string' || !fs.existsSync(filePath)) return false;
+        const key = process.platform === 'win32'
+            ? path.resolve(filePath).toLowerCase()
+            : path.resolve(filePath);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function selectedCursorIsRunning(appPath) {
+    return findRunningCursorAppPaths().some(
+        runningAppPath => sameCursorAppPath(runningAppPath, appPath)
+    );
+}
+
+function createCursorRunningError(appPath) {
+    const error = new Error(`检测到目标 Cursor 正在运行：${appPath}。请完全退出 Cursor 后重试。`);
+    error.code = 'CURSOR_RUNNING';
+    return error;
+}
+
+const runtimeContext = {
+    stage: 'startup',
+    appPath: null,
+};
+
+function setRuntimeContext(stage, appPath) {
+    runtimeContext.stage = stage;
+    if (appPath !== undefined) {
+        runtimeContext.appPath = appPath;
+    }
+}
+
+function appendErrorLog(error) {
+    const errorName = error && error.name ? error.name : 'Error';
+    const errorCode = error && error.code ? String(error.code) : '';
+    const errorMessage = error && error.message ? error.message : String(error);
+    const errorStack = error && error.stack ? error.stack : errorMessage;
+    const childOutput = [error && error.stderr, error && error.stdout]
+        .filter(value => typeof value === 'string' && value.trim())
+        .join('\n');
+    const logContent = [
+        `[${new Date().toISOString()}]`,
+        `版本: ${PACKAGE_VERSION}`,
+        `运行程序: ${process.execPath}`,
+        `阶段: ${runtimeContext.stage}`,
+        `目标 Cursor: ${runtimeContext.appPath || '(未定位)'}`,
+        `错误: ${errorName}${errorCode ? ` (${errorCode})` : ''}: ${errorMessage}`,
+        errorStack,
+        childOutput ? `子进程输出:\n${childOutput}` : '',
+        '',
+    ].filter(Boolean).join('\n');
+    const logDirs = [
+        path.join(path.dirname(CONFIG_FILE), 'logs'),
+        process.env.LOCALAPPDATA
+            ? path.join(process.env.LOCALAPPDATA, 'cursor-chinese', 'logs')
+            : null,
+        process.env.TEMP ? path.join(process.env.TEMP, 'cursor-chinese-logs') : null,
+    ].filter(Boolean);
+
+    for (const logDir of logDirs) {
+        try {
+            fs.mkdirSync(logDir, { recursive: true });
+            const logPath = path.join(logDir, 'cursor-chinese.log');
+            fs.appendFileSync(logPath, `${logContent}\n`, 'utf8');
+            return logPath;
+        } catch {
+            // 日志失败不能覆盖原始错误，也不能阻断退出提示。
+        }
+    }
+
+    return null;
+}
+
+async function waitForErrorExit() {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+    console.log(chalk.gray('按 Enter 键退出...'));
+    await new Promise((resolve) => {
+        process.stdin.resume();
+        process.stdin.once('data', resolve);
+    });
+}
+
+async function reportFatalError(error, waitForUser) {
+    const errorCode = error && error.code ? ` [${error.code}]` : '';
+    const errorMessage = error && error.message ? error.message : String(error);
+    const errorStack = error && error.stack ? error.stack : errorMessage;
+    const logPath = appendErrorLog(error);
+
+    console.error(chalk.red.bold(`❌ 发生未预料的错误${errorCode}: ${errorMessage}`));
+    console.error(chalk.gray(errorStack));
+    if (logPath) {
+        console.error(chalk.gray(`错误日志: ${logPath}`));
+    }
+
+    process.exitCode = 1;
+    if (waitForUser) {
+        try {
+            await waitForErrorExit();
+        } catch {
+            // 错误提示阶段不应再次抛出并掩盖原始异常。
+        }
+    }
 }
 
 async function promptConfirmOrChange(paths) {
@@ -195,14 +348,17 @@ async function obtainCursorPaths(options = {}) {
 // ═══════════════════════════════════════════════
 
 async function runSilent(action) {
+    setRuntimeContext('silent-path-resolution');
     const cliPath = getCliCursorPath();
     const paths = resolveCursorPath({ cliPath: cliPath || undefined });
 
     if (!paths) {
-        console.error('❌ 找不到 Cursor 安装目录！');
-        console.error('请使用 --cursor-path 指定路径，例如：');
-        console.error('  node index.js --action=translate --cursor-path="C:\\Users\\你\\AppData\\Local\\Programs\\cursor"');
-        process.exit(1);
+        throw new Error('找不到 Cursor 安装目录。请使用 --cursor-path 指定有效的 resources/app 或 Cursor.exe 路径。');
+    }
+
+    setRuntimeContext(`silent-${action}`, paths.appPath);
+    if (selectedCursorIsRunning(paths.appPath)) {
+        throw createCursorRunningError(paths.appPath);
     }
 
     if (action === 'translate') {
@@ -210,11 +366,8 @@ async function runSilent(action) {
     } else if (action === 'restore') {
         restore(paths);
     } else {
-        console.error(`❌ 未知操作: ${action}`);
-        process.exit(1);
+        throw new Error(`未知操作: ${action}`);
     }
-
-    process.exit(0);
 }
 
 // ═══════════════════════════════════════════════
@@ -225,15 +378,18 @@ async function runInteractive() {
     console.log('');
     console.log(chalk.cyan.bold('  cursor chinese'));
     console.log(chalk.gray('  Cursor 本地汉化工具 · 一键汉化 / 随时还原'));
+    console.log(chalk.gray(`  版本: ${PACKAGE_VERSION} · 运行程序: ${process.execPath}`));
     console.log(chalk.gray('  ──────────────────────────────────────'));
     console.log('');
 
+    setRuntimeContext('interactive-path-selection');
     const paths = await obtainCursorPaths();
     if (!paths) {
         await waitForExit();
         return;
     }
 
+    setRuntimeContext('interactive-action-selection', paths.appPath);
     console.log(chalk.gray(`  📂 Cursor: ${paths.appPath}`));
     console.log('');
 
@@ -256,21 +412,39 @@ async function runInteractive() {
         return;
     }
 
-    const needElevation = !hasWritePermission(paths.mainJsPath);
+    if (selectedCursorIsRunning(paths.appPath)) {
+        console.log('');
+        console.log(chalk.yellow('  ⚠️ 检测到目标 Cursor 仍在运行。请完全退出 Cursor 后重新运行工具。'));
+        console.log(chalk.gray(`  目标路径: ${paths.appPath}`));
+        console.log('');
+        await waitForExit();
+        return;
+    }
+
+    setRuntimeContext(`interactive-${action}`, paths.appPath);
+    const mutableFilePaths = collectMutableFilePaths(paths);
+    const blockedFilePath = mutableFilePaths.find(filePath => !hasWritePermission(filePath));
+    const needElevation = Boolean(blockedFilePath);
 
     if (needElevation) {
         console.log('');
         console.log(chalk.yellow('  🔒 需要管理员权限才能修改 Cursor 核心文件。'));
+        console.log(chalk.gray(`  需要权限的文件: ${blockedFilePath}`));
         console.log(chalk.yellow('  ⏳ 正在请求提权，请在弹出的系统提示中确认...'));
         console.log('');
 
         try {
+            setRuntimeContext(`elevation-${action}`, paths.appPath);
             await elevateAndRun(action, paths.appPath);
             console.log('');
             console.log(chalk.green.bold('  ✅ 操作已在管理员权限下完成！'));
         } catch (e) {
+            const logPath = appendErrorLog(e);
             console.log('');
             console.log(chalk.red.bold('  ❌ 提权失败或用户取消: ') + chalk.red(e.message));
+            if (logPath) {
+                console.log(chalk.gray(`  错误日志: ${logPath}`));
+            }
         }
     } else {
         if (action === 'translate') {
@@ -285,7 +459,7 @@ async function runInteractive() {
 }
 
 async function waitForExit() {
-    if (process.stdout.isTTY) {
+    if (process.stdin.isTTY && process.stdout.isTTY) {
         await inquirer.prompt([
             {
                 type: 'input',
@@ -301,11 +475,14 @@ async function waitForExit() {
 // ═══════════════════════════════════════════════
 
 const silentAction = parseAction();
-if (silentAction) {
-    runSilent(silentAction);
-} else {
-    runInteractive().catch(err => {
-        console.error(chalk.red('❌ 发生未预料的错误: ') + err.message);
-        process.exit(1);
-    });
+
+async function main() {
+    if (silentAction) {
+        await runSilent(silentAction);
+        return;
+    }
+
+    await runInteractive();
 }
+
+void main().catch(error => reportFatalError(error, !silentAction));

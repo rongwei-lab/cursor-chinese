@@ -15,14 +15,82 @@ const LEGACY_CONFIG_FILE = path.join(os.homedir(), '.cursor-i18n-tool', 'config.
 
 const WORKBENCH_MAIN = path.join('out', 'vs', 'workbench', 'workbench.desktop.main.js');
 const WORKBENCH_GLASS_MAIN = path.join('out', 'vs', 'workbench', 'workbench.glass.main.js');
-const NLS_MESSAGES = path.join('out', 'nls.messages.json');
+const NLS_MESSAGES_FILE = 'nls.messages.json';
+const NLS_MESSAGES = path.join('out', NLS_MESSAGES_FILE);
 
 /**
  * 校验是否为有效的 Cursor resources/app 目录
  */
 function isValidAppPath(appPath) {
-    if (!appPath || !fs.existsSync(appPath)) return false;
+    if (typeof appPath !== 'string' || !appPath || !fs.existsSync(appPath)) return false;
     return fs.existsSync(path.join(appPath, WORKBENCH_MAIN));
+}
+
+function readJsonObject(filePath) {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, ''));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function isSafeClpIdentifier(value) {
+    // Cursor 当前使用十六进制 language pack hash 和 Git commit。只接受该格式，
+    // 避免损坏的用户侧 JSON 将路径拼接引向 CLP 根目录之外。
+    return typeof value === 'string' && /^[a-f0-9]+$/i.test(value);
+}
+
+/**
+ * 查找 Windows 上当前 Cursor 提交对应的简体中文语言包 NLS 缓存。
+ *
+ * Cursor 启用语言包时会优先读取 %APPDATA%\Cursor\clp 中的派生缓存，
+ * 因此安装目录 out/nls.messages.json 已汉化时，缓存仍可能覆盖原生菜单文案。
+ * 用户目录中的语言包信息可能缺失、过期或损坏，不能阻断安装资源的正常处理。
+ *
+ * @param {string} appPath Cursor resources/app 目录
+ * @param {{ platform?: string, appDataDir?: string }} [options] 仅用于测试注入
+ * @returns {string[]}
+ */
+function findWindowsZhCnLanguagePackNlsMessagesPaths(appPath, options = {}) {
+    const targetPlatform = options.platform || PLATFORM;
+    if (targetPlatform !== 'win32') return [];
+
+    try {
+        const appDataDir = options.appDataDir
+            || process.env.APPDATA
+            || path.join(os.homedir(), 'AppData', 'Roaming');
+        const product = readJsonObject(path.join(appPath, 'product.json'));
+        // 不使用 product.json.dataFolderName：当前 Cursor 的值为 .cursor，
+        // 但语言包配置和 CLP 缓存的实际根目录始终是 %APPDATA%\Cursor。
+        const languagePacks = readJsonObject(path.join(appDataDir, 'Cursor', 'languagepacks.json'));
+        const languagePack = languagePacks && languagePacks['zh-cn'];
+        const hash = languagePack && languagePack.hash;
+        const commit = product && product.commit;
+
+        if (!isSafeClpIdentifier(hash) || !isSafeClpIdentifier(commit)) return [];
+
+        const clpRoot = path.resolve(appDataDir, 'Cursor', 'clp');
+        const nlsMessagesPath = path.resolve(
+            clpRoot,
+            `${hash}.zh-cn`,
+            commit,
+            NLS_MESSAGES_FILE
+        );
+        const relativePath = path.relative(clpRoot, nlsMessagesPath);
+        if (
+            relativePath === ''
+            || relativePath === '..'
+            || relativePath.startsWith(`..${path.sep}`)
+            || path.isAbsolute(relativePath)
+        ) {
+            return [];
+        }
+
+        return fs.statSync(nlsMessagesPath).isFile() ? [nlsMessagesPath] : [];
+    } catch {
+        return [];
+    }
 }
 
 /**
@@ -37,6 +105,8 @@ function buildPathsFromAppPath(appPath) {
         // 该文件在旧版本中不存在，因此后续处理都要按可选文件对待。
         glassJsPath: path.join(normalized, WORKBENCH_GLASS_MAIN),
         nlsMessagesPath: path.join(normalized, NLS_MESSAGES),
+        // Windows 语言包会生成独立的 CLP 缓存；只返回当前 zh-cn 提交实际存在的文件。
+        languagePackNlsMessagesPaths: findWindowsZhCnLanguagePackNlsMessagesPaths(normalized),
         htmlPath: path.join(normalized, 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench.html'),
         productJsonPath: path.join(normalized, 'product.json'),
     };
@@ -113,6 +183,67 @@ function normalizeToAppPath(input) {
     if (isValidAppPath(fromResourcesOnly)) return fromResourcesOnly;
 
     return null;
+}
+
+function appPathKey(appPath, targetPlatform = PLATFORM) {
+    const resolved = path.resolve(appPath);
+    return targetPlatform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function normalizeAndDeduplicateAppPaths(inputs, targetPlatform = PLATFORM) {
+    if (!Array.isArray(inputs)) return [];
+
+    const seen = new Set();
+    const paths = [];
+    for (const input of inputs) {
+        const appPath = normalizeToAppPath(input);
+        if (!appPath) continue;
+
+        const key = appPathKey(appPath, targetPlatform);
+        if (seen.has(key)) continue;
+
+        seen.add(key);
+        paths.push(path.resolve(appPath));
+    }
+    return paths;
+}
+
+/**
+ * 查找当前正在运行的 Cursor 所属安装目录。
+ *
+ * 保存的路径可能在 Cursor 升级、改用 Program Files 安装后失效；当系统中只有
+ * 一个运行中的安装时，优先使用它可以避免修改旧版本却让当前窗口保持英文。
+ * 查询失败或同时运行多个不同安装时均降级为原有的配置/候选路径流程。
+ *
+ * @param {{ platform?: string, executablePaths?: string[] }} [options] 仅用于测试注入
+ * @returns {string[]}
+ */
+function findRunningCursorAppPaths(options = {}) {
+    const targetPlatform = options.platform || PLATFORM;
+    if (targetPlatform !== 'win32') return [];
+
+    let executablePaths = options.executablePaths;
+    if (!Array.isArray(executablePaths)) {
+        try {
+            const { execFileSync } = require('child_process');
+            const output = execFileSync('powershell.exe', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                "Get-CimInstance -ClassName Win32_Process -Filter \"Name = 'Cursor.exe'\" | ForEach-Object { $_.ExecutablePath }",
+            ], {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                timeout: 6000,
+                windowsHide: true,
+            });
+            executablePaths = output.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+        } catch {
+            return [];
+        }
+    }
+
+    return normalizeAndDeduplicateAppPaths(executablePaths, targetPlatform);
 }
 
 /**
@@ -234,9 +365,10 @@ function findAllCursorCandidates() {
 
     function add(appPath) {
         const resolved = path.resolve(appPath);
-        if (seen.has(resolved)) return;
+        const key = appPathKey(resolved);
+        if (seen.has(key)) return;
         if (!isValidAppPath(resolved)) return;
-        seen.add(resolved);
+        seen.add(key);
         results.push(resolved);
     }
 
@@ -286,12 +418,12 @@ function saveConfig(partial) {
 }
 
 /**
- * 解析 Cursor 路径（CLI > 已保存 > 自动探测）
- * @param {{ cliPath?: string | null }} [options]
+ * 解析 Cursor 路径（CLI > 唯一运行中实例 > 已保存 > 自动探测）
+ * @param {{ cliPath?: string | null, runningAppPaths?: string[] }} [options] runningAppPaths 仅用于测试注入
  * @returns {{ appPath: string, mainJsPath: string, htmlPath: string, productJsonPath: string } | null}
  */
 function resolveCursorPath(options = {}) {
-    const { cliPath } = options;
+    const { cliPath, runningAppPaths } = options;
 
     if (cliPath) {
         const appPath = normalizeToAppPath(cliPath);
@@ -300,6 +432,13 @@ function resolveCursorPath(options = {}) {
             return buildPathsFromAppPath(appPath);
         }
         return null;
+    }
+
+    const runningCandidates = Array.isArray(runningAppPaths)
+        ? normalizeAndDeduplicateAppPaths(runningAppPaths)
+        : findRunningCursorAppPaths();
+    if (runningCandidates.length === 1) {
+        return buildPathsFromAppPath(runningCandidates[0]);
     }
 
     const config = loadConfig();
@@ -314,10 +453,11 @@ function resolveCursorPath(options = {}) {
     }
 
     if (candidates.length > 1) {
-        // 多个安装：优先使用已保存且仍在列表中的路径
-        if (config.cursorAppPath) {
-            const saved = path.resolve(config.cursorAppPath);
-            const match = candidates.find(c => path.resolve(c) === saved);
+        // 多个安装：优先使用已保存且仍在列表中的路径。Windows 路径大小写不敏感，
+        // 否则 Program Files\\Cursor 与 Program Files\\cursor 会被误判为不同安装。
+        if (typeof config.cursorAppPath === 'string' && config.cursorAppPath) {
+            const savedKey = appPathKey(config.cursorAppPath);
+            const match = candidates.find(c => appPathKey(c) === savedKey);
             if (match) return buildPathsFromAppPath(match);
         }
         return null;
@@ -355,14 +495,50 @@ function parseCursorPathArg() {
 }
 
 /**
- * 检测目标文件是否有写入权限
+ * 检测目标文件及其所在目录是否真的可写。
+ *
+ * Windows 的 fs.access(W_OK) 在 UAC 分离令牌下可能对 Program Files 返回误判；
+ * 汉化实际还要在同目录创建备份和临时文件，因此使用无内容的独占探针验证。
  */
 function hasWritePermission(filePath) {
+    if (typeof filePath !== 'string' || !filePath || !fs.existsSync(filePath)) {
+        return false;
+    }
+
+    const dir = path.dirname(filePath);
+    const probePath = path.join(
+        dir,
+        `.cursor-chinese-write-probe-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    );
+    let targetDescriptor;
+    let probeDescriptor;
+    let probeCreated = false;
+
     try {
-        fs.accessSync(filePath, fs.constants.W_OK);
+        // 只打开、不写入原文件，避免权限预检本身改变 Cursor 资源。
+        targetDescriptor = fs.openSync(filePath, 'r+');
+        fs.closeSync(targetDescriptor);
+        targetDescriptor = undefined;
+
+        probeDescriptor = fs.openSync(probePath, 'wx');
+        probeCreated = true;
+        fs.closeSync(probeDescriptor);
+        probeDescriptor = undefined;
+        fs.unlinkSync(probePath);
+        probeCreated = false;
         return true;
     } catch {
         return false;
+    } finally {
+        if (typeof targetDescriptor === 'number') {
+            try { fs.closeSync(targetDescriptor); } catch {}
+        }
+        if (typeof probeDescriptor === 'number') {
+            try { fs.closeSync(probeDescriptor); } catch {}
+        }
+        if (probeCreated) {
+            try { fs.unlinkSync(probePath); } catch {}
+        }
     }
 }
 
@@ -385,17 +561,32 @@ function elevateAndRun(action, cursorAppPath) {
             command = `"${process.execPath}" "${entryScript}" --action=${action}${pathArg}`;
         }
 
+        // Program Files 安装通常需要 UAC。显式传递原调用者的用户目录，
+        // 防止使用另一管理员凭据时，提权子进程改去读取该管理员的 CLP 缓存。
+        const userDataEnv = {};
+        for (const key of ['APPDATA', 'LOCALAPPDATA', 'USERPROFILE']) {
+            if (typeof process.env[key] === 'string' && process.env[key]) {
+                userDataEnv[key] = process.env[key];
+            }
+        }
         const options = {
             name: 'cursor chinese',
+            ...(Object.keys(userDataEnv).length > 0 ? { env: userDataEnv } : {}),
         };
 
         sudo.exec(command, options, (error, stdout, stderr) => {
-            if (error) {
-                reject(error);
-                return;
-            }
             if (stdout) process.stdout.write(stdout);
             if (stderr) process.stderr.write(stderr);
+            if (error) {
+                const elevatedError = error instanceof Error ? error : new Error(String(error));
+                elevatedError.stdout = stdout || '';
+                elevatedError.stderr = stderr || '';
+                if (stderr && !elevatedError.message.includes(String(stderr).trim())) {
+                    elevatedError.message = `${elevatedError.message}\n${String(stderr).trim()}`;
+                }
+                reject(elevatedError);
+                return;
+            }
             resolve();
         });
     });
@@ -407,6 +598,8 @@ module.exports = {
     isValidAppPath,
     normalizeToAppPath,
     buildPathsFromAppPath,
+    findWindowsZhCnLanguagePackNlsMessagesPaths,
+    findRunningCursorAppPaths,
     findAllCursorCandidates,
     loadConfig,
     saveConfig,

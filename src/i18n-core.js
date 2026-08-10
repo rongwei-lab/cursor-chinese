@@ -632,10 +632,37 @@ const cursor315DynamicReplacements = [
         regex: /`Use\s+with\s+caution\.\s*Skip\s+symlinks\s+during\s+\.cursorignore\s+file\s+discovery\.\s*Enable\s+only\s+when\s+all\s+\.cursorignore\s+files\s+are\s+reachable\s+without\s+symlinks(\$\{[^}]+\})?\.\s*Changing\s+this\s+setting\s+requires\s+restarting\s+Cursor\.`/gi,
         zh: '`谨慎使用。在查找 .cursorignore 文件时跳过符号链接。仅当无需符号链接即可访问所有 .cursorignore 文件时才启用$1。更改此设置需要重启 Cursor。`',
     },
+    {
+        // Cursor 3.15.6 把末尾合并为 " files"；旧版本仍可能拆为 " ", "files"。
+        regex: /\[\s*"Automatically\s+index\s+any\s+new\s+folders\s+with\s+fewer\s+than"\s*,\s*" "\s*,\s*(.+?)\s*,\s*(?:"\s+files"|" "\s*,\s*"files")\s*\]/gi,
+        zh: '["自动索引少于", " ", $1, " 个文件的新文件夹"]',
+    },
 ];
 
 const auxiliaryRegexReplacements = [
     ...cursor315DynamicReplacements,
+    // Glass 顶部菜单不读取 NLS，以下规则仅在 workbench.glass.main.js 中执行。
+    {
+        regex: /(\{\s*menuId\s*:\s*[^,}]*MenubarFileMenu[^,}]*,\s*label\s*:\s*)"File"/g,
+        zh: '$1"文件"',
+    },
+    {
+        regex: /(\{\s*menuId\s*:\s*[^,}]*MenubarEditMenu[^,}]*,\s*label\s*:\s*)"Edit"/g,
+        zh: '$1"编辑"',
+    },
+    {
+        regex: /(\{\s*menuId\s*:\s*[^,}]*MenubarViewMenu[^,}]*,\s*label\s*:\s*)"View"/g,
+        zh: '$1"视图"',
+    },
+    {
+        regex: /(\{\s*menuId\s*:\s*[^,}]*MenubarHelpMenu[^,}]*,\s*label\s*:\s*)"Help"/g,
+        zh: '$1"帮助"',
+    },
+    {
+        // Exit 在 bundle 中高频出现，只替换 Glass 文件菜单的退出项。
+        regex: /(id:"quitApplication"[^{}]{0,800}menu:\{column:[^,}]+,group:"9_exit",order:0,title:)"Exit"/g,
+        zh: '$1"退出"',
+    },
     {
         regex: /Submit\s+with\s+(\$\{[^}]+\}|\\u2318\s*\+\s*|⌘\s*\+\s*|Ctrl\s*\+\s*)Enter/gi,
         zh: '使用 $1Enter 提交',
@@ -643,10 +670,6 @@ const auxiliaryRegexReplacements = [
     {
         regex: /When\s+enabled,\s+(\$\{[^}]+\}|\\u2318\s*\+\s*|⌘\s*\+\s*|Ctrl\s*\+\s*)Enter\s+submits\s+chat\s+and\s+Enter\s+inserts\s+a\s+newline/gi,
         zh: '启用后，$1Enter 提交聊天，Enter 插入换行',
-    },
-    {
-        regex: /\[\s*"Automatically\s+index\s+any\s+new\s+folders\s+with\s+fewer\s+than"\s*,\s*" "\s*,\s*(.+?)\s*,\s*" "\s*,\s*"files"\s*\]/gi,
-        zh: '["自动索引少于", " ", $1, " ", "个文件的新文件夹"]',
     },
     {
         regex: /Search\s+settings\s+\$\{([^}]+)\}/g,
@@ -741,10 +764,11 @@ function translateAuxiliaryJsFile(filePath, productJsonPath) {
     return { processed: true, hashFixed };
 }
 
-function translateNlsMessagesFile(filePath) {
+function translateNlsMessagesFile(filePath, sourceLabel) {
     if (!filePath || !fs.existsSync(filePath)) return { processed: false };
 
-    console.log('\n⚙️  正在处理原生提示文案: nls.messages.json');
+    const labelSuffix = sourceLabel ? `（${sourceLabel}）` : '';
+    console.log(`\n⚙️  正在处理原生提示文案: nls.messages.json${labelSuffix}`);
 
     let messages;
     try {
@@ -809,9 +833,37 @@ function translateNlsMessagesFile(filePath) {
 
     progress.finish('原生提示处理完成');
     changes.print();
-    console.log('✅ nls.messages.json 汉化完成！');
+    console.log(`✅ nls.messages.json${labelSuffix} 汉化完成！`);
 
     return { processed: true };
+}
+
+/**
+ * 合并安装目录与语言包缓存中的 NLS 文件，避免同一路径被重复备份或重复写入。
+ * 语言包缓存只在 Windows 发现阶段确认存在；恢复时仍保留其路径，以便用 .backup 重建文件。
+ */
+function collectNlsMessagesTargets(nlsMessagesPath, languagePackNlsMessagesPaths) {
+    const targets = [];
+    const seen = new Set();
+    const addTarget = (filePath, label) => {
+        if (typeof filePath !== 'string' || !filePath) return;
+
+        const resolved = path.resolve(filePath);
+        const key = PLATFORM === 'win32' ? resolved.toLowerCase() : resolved;
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        targets.push({ filePath: resolved, label });
+    };
+
+    addTarget(nlsMessagesPath, '安装目录默认 NLS');
+    if (Array.isArray(languagePackNlsMessagesPaths)) {
+        for (const filePath of languagePackNlsMessagesPaths) {
+            addTarget(filePath, '中文语言包缓存 NLS');
+        }
+    }
+
+    return targets;
 }
 
 
@@ -821,18 +873,38 @@ function translateNlsMessagesFile(filePath) {
 
 /**
  * 执行汉化
- * @param {{ appPath: string, mainJsPath: string, glassJsPath?: string, nlsMessagesPath?: string, htmlPath: string, productJsonPath: string }} paths
+ * @param {{ appPath: string, mainJsPath: string, glassJsPath?: string, nlsMessagesPath?: string, languagePackNlsMessagesPaths?: string[], htmlPath: string, productJsonPath: string }} paths
  */
 function translate(paths) {
-    const { appPath, mainJsPath, glassJsPath, nlsMessagesPath, htmlPath, productJsonPath } = paths;
+    const {
+        appPath,
+        mainJsPath,
+        glassJsPath,
+        nlsMessagesPath,
+        languagePackNlsMessagesPaths,
+        htmlPath,
+        productJsonPath,
+    } = paths;
+    const nlsMessagesTargets = collectNlsMessagesTargets(
+        nlsMessagesPath,
+        languagePackNlsMessagesPaths
+    );
 
     // 1. 备份
     console.log('');
+    console.log(`📂 目标 Cursor: ${appPath}`);
+    for (const { filePath, label } of nlsMessagesTargets) {
+        console.log(`   ${label}: ${filePath}`);
+    }
     const msgs = [
         backupFile(htmlPath),
         backupFile(mainJsPath),
         glassJsPath && fs.existsSync(glassJsPath) ? backupFile(glassJsPath) : null,
-        nlsMessagesPath && fs.existsSync(nlsMessagesPath) ? backupFile(nlsMessagesPath) : null,
+        ...nlsMessagesTargets.map(({ filePath, label }) => {
+            if (!fs.existsSync(filePath)) return null;
+            const message = backupFile(filePath);
+            return message ? `[${label}] ${message}` : null;
+        }),
         backupFile(productJsonPath),
     ].filter(Boolean);
     msgs.forEach(m => console.log(`  ${m}`));
@@ -960,12 +1032,6 @@ function translate(paths) {
             // 攻克 19：Preview Box for Terminal ${Fs?"⌘":"Ctrl+"}K
             regex: /Preview\s+Box\s+for\s+Terminal\s+(\$\{[^}]+\}|Ctrl\+)K/gi,
             zh: '终端 $1K 的预览框'
-        },
-        {
-            // 攻克 20：Automatically index any new folders with fewer than 250,000 files
-            // 实际代码是一个数组：["Automatically index any new folders with fewer than"," ",Ui(()=>...)," ","files"]
-            regex: /\[\s*"Automatically\s+index\s+any\s+new\s+folders\s+with\s+fewer\s+than"\s*,\s*" "\s*,\s*(.+?)\s*,\s*" "\s*,\s*"files"\s*\]/gi,
-            zh: '["自动索引少于", " ", $1, " ", "个文件的新文件夹"]'
         },
         {
             // 攻克 21：Automatically index repositories to speed up Grep searches. All data is stored locally.
@@ -2115,7 +2181,9 @@ function translate(paths) {
         }
     }
 
-    translateNlsMessagesFile(nlsMessagesPath);
+    for (const { filePath, label } of nlsMessagesTargets) {
+        translateNlsMessagesFile(filePath, label);
+    }
 
     // 9. Mac Gatekeeper 修复
     fixMacGatekeeper(appPath);
@@ -2126,16 +2194,36 @@ function translate(paths) {
 
 /**
  * 恢复英文原版
- * @param {{ mainJsPath: string, glassJsPath?: string, nlsMessagesPath?: string, htmlPath: string, productJsonPath: string }} paths
+ * @param {{ mainJsPath: string, glassJsPath?: string, nlsMessagesPath?: string, languagePackNlsMessagesPaths?: string[], htmlPath: string, productJsonPath: string }} paths
  */
 function restore(paths) {
-    const { mainJsPath, glassJsPath, nlsMessagesPath, htmlPath, productJsonPath } = paths;
+    const {
+        mainJsPath,
+        glassJsPath,
+        nlsMessagesPath,
+        languagePackNlsMessagesPaths,
+        htmlPath,
+        productJsonPath,
+    } = paths;
+    const nlsMessagesTargets = collectNlsMessagesTargets(
+        nlsMessagesPath,
+        languagePackNlsMessagesPaths
+    );
 
     console.log('');
     let restored = 0;
-    for (const filePath of [htmlPath, mainJsPath, glassJsPath, nlsMessagesPath, productJsonPath].filter(Boolean)) {
+    const restoreTargets = [
+        { filePath: htmlPath },
+        { filePath: mainJsPath },
+        { filePath: glassJsPath },
+        ...nlsMessagesTargets,
+        { filePath: productJsonPath },
+    ];
+    for (const { filePath, label } of restoreTargets) {
+        if (!filePath) continue;
         if (restoreFromBackup(filePath)) {
-            console.log(`  ✅ 已还原: ${path.basename(filePath)}`);
+            const labelSuffix = label ? `（${label}）` : '';
+            console.log(`  ✅ 已还原: ${path.basename(filePath)}${labelSuffix}`);
             restored++;
         }
     }

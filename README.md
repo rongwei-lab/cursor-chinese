@@ -10,6 +10,8 @@ Cursor 的官方界面中仍有不少英文文案，尤其是设置页、Agent �
 
 - 将 Cursor 常见英文 UI 文案替换为中文。
 - 补充 Cursor 新版本中遗漏或新增的英文界面。
+- 覆盖 Glass 顶部菜单与动态索引数量等不走语言包的运行时文案。
+- Windows 启用简体中文语言包时，同步处理当前版本的原生菜单 CLP 缓存。
 - 支持一键汉化和恢复英文原版。
 - 自动备份原始资源文件，便于回退。
 - 自动更新 `product.json` 校验值，减少“安装已损坏”提示。
@@ -41,7 +43,8 @@ Cursor 的官方界面中仍有不少英文文案，尤其是设置页、Agent �
 
 兼容性说明：
 
-- Windows：支持常见的 Cursor 用户目录安装和 Program Files 安装路径。
+- Windows：支持常见的 Cursor 用户目录安装和 Program Files 安装路径；只有一个 Cursor 正在运行时，优先处理该实例所属安装，避免保存的旧路径指向已不再使用的版本。
+- Windows：对 Program Files 安装会自动请求管理员权限；执行汉化或恢复前请完全退出目标 Cursor，避免资源文件被占用。
 - macOS：支持 `/Applications/Cursor.app` 和用户目录下的 `Applications/Cursor.app`。
 - Linux：支持常见的 `/opt/Cursor`、`/usr/share/cursor`、`/usr/lib/cursor`、`~/.local/share/cursor` 等安装路径；如果使用 AppImage 或非标准路径，建议手动指定 `resources/app`。
 - Cursor 更新后，官方资源文件会被覆盖，需要重新运行本工具。
@@ -93,6 +96,8 @@ tar -xzf cursor-chinese-linux-arm64.tar.gz
 - `一键汉化`：修改 Cursor 资源文件并应用中文。
 - `恢复英文`：从 `.backup` 备份恢复原始文件。
 - `退出`：关闭工具。
+
+Windows 运行失败时，工具会保留控制台窗口并显示实际错误；完整日志默认写入 `%USERPROFILE%\\.cursor-chinese\\logs\\cursor-chinese.log`，写入失败时会回退到 `%LOCALAPPDATA%\\cursor-chinese\\logs` 或 `%TEMP%`。
 
 ### 方式二：使用 Node.js 从源码运行
 
@@ -219,6 +224,12 @@ product.json.backup
 ```
 
 恢复英文时会优先使用这些备份文件。
+
+Windows 启用简体中文语言包时，Cursor 会优先读取用户目录中的 CLP 缓存。工具会仅处理当前 Cursor 提交对应的下列文件，并在同目录创建 `.backup`，恢复英文时也会一并还原：
+
+```text
+%APPDATA%\Cursor\clp\<language-pack-hash>.zh-cn\<cursor-commit>\nls.messages.json
+```
 
 ## 权限说明
 
