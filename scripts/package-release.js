@@ -24,12 +24,14 @@ const artifacts = [
         output: 'cursor-chinese-macos-arm64.tar.gz',
         type: 'tar',
         executable: true,
+        macos: true,
     },
     {
         input: 'cursor-chinese-macos-x64',
         output: 'cursor-chinese-macos-x64.tar.gz',
         type: 'tar',
         executable: true,
+        macos: true,
     },
     {
         input: 'cursor-chinese-linux-arm64',
@@ -85,6 +87,11 @@ function packageArtifact(artifact) {
     const outputPath = path.join(distDir, artifact.output);
 
     ensureFile(inputPath);
+
+    if (artifact.macos && process.platform === 'darwin') {
+        // ARM64 未签名时会在 macOS 启动前被 SIGKILL；打包前直接阻止错误产物进入 Release。
+        run('codesign', ['--verify', '--verbose=2', inputPath]);
+    }
 
     if (artifact.executable) {
         // 先修正本地权限，再进入 tar.gz；tar 会把这个权限保存到压缩包里。

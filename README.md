@@ -145,6 +145,8 @@ npm run build:win
 npm run build:mac
 ```
 
+macOS 构建会自动为 x64 和 ARM64 可执行文件添加 ad-hoc 签名。Apple Silicon 上如果缺少代码签名，系统可能在程序启动前直接终止进程并显示 `zsh: killed`。
+
 仅生成 Linux：
 
 ```bash

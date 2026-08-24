@@ -1,6 +1,6 @@
 {
   "name": "cursor-chinese",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "cursor chinese — Cursor 编辑器一键汉化工具",
   "main": "index.js",
   "bin": {
@@ -11,7 +11,7 @@
     "test": "node --test",
     "build": "npm run build:win && npm run build:mac && npm run build:linux",
     "build:win": "pkg . --output dist/cursor-chinese-win-x64.exe --targets node18-win-x64 --no-bytecode --public-packages \"*\"",
-    "build:mac": "pkg . --output dist/cursor-chinese-macos-x64 --targets node18-macos-x64 --no-bytecode --public-packages \"*\" && pkg . --output dist/cursor-chinese-macos-arm64 --targets node18-macos-arm64 --no-bytecode --public-packages \"*\"",
+    "build:mac": "pkg . --output dist/cursor-chinese-macos-x64 --targets node18-macos-x64 --no-bytecode --public-packages \"*\" && pkg . --output dist/cursor-chinese-macos-arm64 --targets node18-macos-arm64 --no-bytecode --public-packages \"*\" && node scripts/sign-macos.js dist/cursor-chinese-macos-x64 dist/cursor-chinese-macos-arm64",
     "build:linux": "pkg . --output dist/cursor-chinese-linux-x64 --targets node18-linux-x64 --no-bytecode --public-packages \"*\" && pkg . --output dist/cursor-chinese-linux-arm64 --targets node18-linux-arm64 --no-bytecode --public-packages \"*\"",
     "pack:release": "node scripts/package-release.js",
     "build:release": "npm run build && npm run pack:release"
