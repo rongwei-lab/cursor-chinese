@@ -11,6 +11,7 @@ Cursor 的官方界面中仍有不少英文文案，尤其是设置页、Agent �
 - 将 Cursor 常见英文 UI 文案替换为中文。
 - 补充 Cursor 新版本中遗漏或新增的英文界面。
 - 覆盖 Glass 顶部菜单与动态索引数量等不走语言包的运行时文案。
+- 补充 Cursor 3.27 设置目录、消息队列、读取权限、语音语言、主题编辑器与 MCP 账号配置的汉化。
 - Windows 启用简体中文语言包时，同步处理当前版本的原生菜单 CLP 缓存。
 - 支持一键汉化和恢复英文原版。
 - 自动备份原始资源文件，便于回退。
@@ -187,7 +188,9 @@ npm run pack:release
 
 4. 执行汉化替换。
    - `src/dict.js` 保存相对安全的全局长句词典。
+   - `src/settings-dict.js` 补充新版设置文案、动态模板、主题字段和语音语言名称。
    - `src/i18n-core.js` 处理复杂模板、短词保护、作用域替换和顽固词条。
+   - 设置页的短词仅在界面属性或 HTML 文本节点中替换；语音语言代码、主题颜色键和配置值保持原样。
    - 对 `Read`、`file`、`Agent` 等高频词，尽量使用上下文精准替换，避免误伤代码逻辑。
 
 5. 写回 Cursor 核心 JS 文件。
@@ -206,6 +209,7 @@ npm run pack:release
 | `src/platform.js` | 跨平台路径检测、配置保存、权限检查、提权执行 |
 | `src/i18n-core.js` | 核心汉化、备份恢复、校验修复、macOS 签名处理 |
 | `src/dict.js` | 安全词典和短词词典 |
+| `src/settings-dict.js` | 新版设置词典、动态提示、主题字段和语音语言名称 |
 | `keys.json` | 词条辅助数据 |
 | `dist/` | 编译后的可执行文件 |
 
@@ -329,6 +333,13 @@ node --check index.js
 node --check src/i18n-core.js
 node --check src/platform.js
 node --check src/dict.js
+node --check src/settings-dict.js
+```
+
+运行回归测试（包括两个工作台的设置汉化、插值保留、重复执行和备份恢复）：
+
+```bash
+npm test
 ```
 
 本地运行：

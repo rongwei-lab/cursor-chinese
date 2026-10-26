@@ -6,8 +6,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
-const { safeGlobalDict, nativeNlsDict, riskyShortWords } = require('./dict');
+const { safeGlobalDict: baseSafeGlobalDict, nativeNlsDict, riskyShortWords } = require('./dict');
+const { settingsPhrases, settingsUiWords, settingsTemplates, themeTokenLabels, voiceLanguageNames } = require('./settings-dict');
 const { PLATFORM } = require('./platform');
+const safeGlobalDict = { ...baseSafeGlobalDict, ...settingsPhrases };
 
 // 辅助：转义正则特殊字符
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -66,6 +68,126 @@ const riskyRegexes = Object.entries(riskyShortWords).map(([en, zh]) => {
         htmlRegex: new RegExp(`>\\s*(${escaped})\\s*<`, 'g'),
     };
 });
+
+// 设置页同时使用 React 属性和 Solid 的 HTML 模板。只解码静态字符串，
+// 不匹配 value、id、配置键或带插值的模板；后者由专门的动态规则处理。
+const settingsUiProps = [
+    ...uiProps.filter(prop => prop !== 'name'), 'accessibleLabel', 'actionTitle',
+    'confirmLabel', 'cancelLabel', 'openLabel', 'heading', 'placeHolder', 'prompt', 'intro',
+    'notReady', 'disabledByPrivacyMode', 'storeUnavailable', 'migrationRunning', 'body', 'elementName',
+].map(escapeRegExp).join('|');
+const staticUiLiteral = '"(?:\\\\[\\s\\S]|[^"\\\\])*"|\'(?:\\\\[\\s\\S]|[^\'\\\\])*\'|`(?:\\\\[\\s\\S]|[^`\\\\$]|\\$(?!\\{))*`';
+const settingsUiPropRegex = new RegExp(
+    `((?<![\\w$])(?:${settingsUiProps}|"(?:${settingsUiProps})"|'(?:${settingsUiProps})')\\s*:\\s*)(${staticUiLiteral})`,
+    'g'
+);
+const settingsUiTranslations = Object.assign(Object.create(null), safeGlobalDict, riskyShortWords, settingsUiWords);
+const settingsHtmlPattern = Object.keys({ ...riskyShortWords, ...settingsUiWords, ...settingsPhrases })
+    .sort((a, b) => b.length - a.length).map(escapeRegExp).join('|');
+const settingsHtmlRegex = new RegExp(`>(\\s*)(${settingsHtmlPattern})(\\s*)(?=<|["'\x60])`, 'g');
+
+// 独立长句可能位于 return、数组或提示对象中；为原文生成合法的引号/转义形式，
+// 精确匹配整个字面量，避免英文引号和 Unicode 编译转义造成漏翻或破坏 JS。
+const settingsLiteralTranslations = new Map();
+for (const [english, chinese] of Object.entries(settingsPhrases)) {
+    const json = JSON.stringify(english);
+    const inner = json.slice(1, -1).replace(/\\"/g, '"');
+    const variants = [json, `'${inner.replace(/'/g, "\\'")}'`, '`' + inner.replace(/`/g, '\\`') + '`'];
+    for (const literal of variants) {
+        settingsLiteralTranslations.set(literal, chinese);
+        for (const upper of [false, true]) {
+            const ascii = literal.replace(/[^\x00-\x7f]/g, char => {
+                const hex = char.charCodeAt(0).toString(16).padStart(4, '0');
+                return '\\u' + (upper ? hex.toUpperCase() : hex);
+            });
+            settingsLiteralTranslations.set(ascii, chinese);
+            const latin = literal.replace(/[^\x00-\x7f]/g, char => {
+                const value = char.charCodeAt(0);
+                const hex = value.toString(16).padStart(value < 256 ? 2 : 4, '0');
+                return (value < 256 ? '\\x' : '\\u') + (upper ? hex.toUpperCase() : hex);
+            });
+            settingsLiteralTranslations.set(latin, chinese);
+        }
+    }
+}
+const settingsLiteralRegex = new RegExp([...settingsLiteralTranslations.keys()]
+    .sort((a, b) => b.length - a.length).map(escapeRegExp).join('|'), 'g');
+// 允许内容插值中包含对象或嵌套模板；花括号不平衡或超过深度时保留原文。
+let settingsExpressionPattern = '[^{}]*';
+for (let depth = 0; depth < 3; depth++) {
+    settingsExpressionPattern = `(?:[^{}]|\\{${settingsExpressionPattern}\\})*`;
+}
+const settingsTemplateRules = Object.entries(settingsTemplates).map(([english, chinese]) => {
+    const slots = [];
+    const pattern = english.split(/(\{\d+\})/g).map(part => {
+        if (/^\{\d+\}$/.test(part)) {
+            slots.push(Number(part.slice(1, -1)));
+            return '(\\$\\{' + settingsExpressionPattern + '\\})';
+        }
+        return escapeRegExp(part).replace(/["']/g, quote => '\\\\?' + quote)
+            .replace(/\n/g, '(?:\\n|\\\\n)')
+            .replace(/·/g, '(?:·|\\\\x[Bb]7|\\\\u00[Bb]7)')
+            .replace(/—/g, '(?:—|\\\\u2014)');
+    }).join('');
+    return { english, chinese, slots, regex: new RegExp('`' + pattern + '`', 'g') };
+});
+
+function decodeStaticUiLiteral(literal) {
+    const escapes = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0' };
+    return literal.slice(1, -1).replace(
+        /\\(?:u\{([0-9a-f]+)\}|u([0-9a-f]{4})|x([0-9a-f]{2})|(\r\n|[\r\n])|([\s\S]))/gi,
+        (_, point, unicode, hex, newline, char) => {
+            if (point || unicode || hex) return String.fromCodePoint(parseInt(point || unicode || hex, 16));
+            if (newline) return '';
+            return Object.prototype.hasOwnProperty.call(escapes, char) ? escapes[char] : char;
+        }
+    );
+}
+
+function translateSettingsUi(content, changes) {
+    let nextContent = content;
+    nextContent = nextContent.replace(
+        /(description:[$\w]+\[([$\w]+)\],label:)([$\w]+)\(\2\)(,tokenName:\2,usesHex8ByDefault:)/g,
+        (_, prefix, token, formatLabel, suffix) => {
+            changes.record('设置动态字段', '主题颜色字段名称', '中文主题颜色字段名称', 1);
+            return `${prefix}(${JSON.stringify(themeTokenLabels)}[${token}]??${formatLabel}(${token}))${suffix}`;
+        }
+    );
+    nextContent = nextContent.replace(
+        /(\b[$\w]+\s*=\s*)\{auto:"Auto-detect",en:"English",[^{}]{100,3000}vi:"Vietnamese"\}/g,
+        (_, prefix) => {
+            changes.record('设置动态字段', '语音语言显示表', '中文语言名称（保留语言代码）', 1);
+            return prefix + JSON.stringify(voiceLanguageNames);
+        }
+    );
+    for (const { english, chinese, slots, regex } of settingsTemplateRules) {
+        nextContent = nextContent.replace(regex, (...args) => {
+            const translated = chinese.replace(/\{(\d+)\}/g, (_, slot) => args[slots.indexOf(Number(slot)) + 1]);
+            changes.record('设置动态文本', english, chinese, 1);
+            return '`' + translated + '`';
+        });
+    }
+    nextContent = nextContent.replace(settingsLiteralRegex, literal => {
+        const chinese = settingsLiteralTranslations.get(literal);
+        changes.record('设置完整长句', literal, chinese, 1);
+        return JSON.stringify(chinese);
+    });
+    const propertyContent = nextContent;
+    nextContent = nextContent.replace(settingsUiPropRegex, (match, prefix, literal, offset) => {
+        const english = decodeStaticUiLiteral(literal);
+        const chinese = settingsUiTranslations[english];
+        if (!chinese) return match;
+        if (english.length < 20 && isProtectedKeybindingContext(propertyContent, offset, english)) return match;
+        changes.record('设置界面文本', english, chinese, 1);
+        return prefix + JSON.stringify(chinese);
+    });
+    nextContent = nextContent.replace(settingsHtmlRegex, (match, before, english, after) => {
+        const chinese = settingsUiTranslations[english];
+        changes.record('设置 HTML 文本', english, chinese, 1);
+        return `>${before}${chinese}${after}`;
+    });
+    return nextContent;
+}
 
 // ═══════════════════════════════════════════════
 // 终端进度展示
@@ -352,6 +474,13 @@ function fixMacGatekeeper(appPath) {
 // Cursor 3.14 将部分设置短词作为控件属性直接写进两个工作台 bundle。
 // 只匹配 label/title 等可见字段，避免把 Startup、Preview 一类短词替换进内部逻辑。
 const settingsControlReplacements = [
+    ['voice:"Voice"', 'voice:"语音"'],
+    ['"git-prs":"Source Control"', '"git-prs":"源代码管理"'],
+    ['indexing:"Code Intelligence"', 'indexing:"代码智能"'],
+    ['queue:"Queue"', 'queue:"排队"'],
+    ['case"explicit":return"Theme"', 'case"explicit":return"主题"'],
+    ['name:"Audio Files"', 'name:"音频文件"'],
+    ['name:"YAML files"', 'name:"YAML 文件"'],
     ['section:"Browser"', 'section:"浏览器"'],
     ['label:"Cloud"', 'label:"云端"'],
     ['label:"Workspace"', 'label:"工作区"'],
@@ -617,6 +746,74 @@ const auxiliaryInterfaceReplacements = [
 // Cursor 3.15 的设置页将部分说明编译为模板字符串，desktop 与 Glass 共用这些规则。
 const cursor315DynamicReplacements = [
     {
+        regex: /Automatically\s+parse\s+links\s+when\s+pasted\s+into\s+Quick\s+Edit\s+\((\$\{[^}]+\})K\)\s+input/g,
+        zh: '粘贴到快速编辑 ($1K) 输入框时自动解析链接',
+    },
+    {
+        regex: /Show\s+a\s+hint\s+for\s+(\$\{[^}]+\})K\s+in\s+the\s+Terminal/g,
+        zh: '在终端中显示 $1K 提示',
+    },
+    {
+        regex: /Automatically\s+import\s+necessary\s+modules\s+for\s+(\$\{[^}]+\})/g,
+        zh: '自动为 $1 导入必要的模块',
+    },
+    {
+        regex: /(progressLabel:([$\w]+)=>\2==="TO_STORE"\?)"Syncing":"Restoring"/g,
+        zh: '$1"正在同步":"正在恢复"',
+    },
+    {
+        regex: /Preview Box for Terminal (\$\{[^}]+\})K/g,
+        zh: '终端 $1K 预览框',
+    },
+    {
+        regex: /Preview Box for Terminal Cmd\/Ctrl\+K/g,
+        zh: '终端 Cmd/Ctrl+K 预览框',
+    },
+    {
+        regex: /Run Mode \(Enforced by ~\/(\$\{[^}]+\})\/permissions\.json\)/g,
+        zh: '运行模式（由 ~/$1/permissions.json 强制指定）',
+    },
+    {
+        regex: /Your system is in high contrast, so your (\$\{[^}]+\}) is in use\. This applies when it turns off/g,
+        zh: '系统处于高对比度模式，当前使用$1。关闭高对比度模式后将应用此设置',
+    },
+    {
+        regex: /Model name must be at most (\$\{[^}]+\}) characters\./g,
+        zh: '模型名称不能超过 $1 个字符。',
+    },
+    {
+        regex: /Are you sure you want to remove the model \\?"(\$\{[^}]+\})\\?"\? You can add it back later\./g,
+        zh: '确定要移除模型“$1”吗？之后可以重新添加。',
+    },
+    {
+        regex: /Use (\$\{[^}]+\}) API Key/g,
+        zh: '使用 $1 API 密钥',
+    },
+    {
+        regex: /`(\$\{[^}]+\}) API Key`/g,
+        zh: '`$1 API 密钥`',
+    },
+    {
+        regex: /Skills synced\. Manage setting \[here\]\((\$\{[^}]+\})\)/g,
+        zh: '技能已同步。可在[此处]($1)管理设置',
+    },
+    {
+        regex: /Last synced (\$\{[^}]+\})/g,
+        zh: '上次同步：$1',
+    },
+    {
+        regex: /Last accessed (\$\{[^}]+\})/g,
+        zh: '上次访问：$1',
+    },
+    {
+        regex: /Waiting for approval (?:·|\\xB7|\\u00b7) code (\$\{[^}]+\})/gi,
+        zh: '等待批准 · 验证码 $1',
+    },
+    {
+        regex: /Type of Agents Window is managed by the (\$\{[^}]+\}) gate\./g,
+        zh: '智能体窗口类型由 $1 功能开关管理。',
+    },
+    {
         regex: /(\$\{[^}]+\})\s+submits\s+chat,\s+Enter\s+inserts\s+a\s+newline,\s+and\s+primary\s+actions\s+move\s+to\s+(\$\{[^}]+\})/g,
         zh: '$1 提交聊天，Enter 插入换行，主要操作移至 $2',
     },
@@ -692,6 +889,8 @@ function translateAuxiliaryJsFile(filePath, productJsonPath) {
     const changes = createChangeTracker();
 
     progress.update('准备汉化附加窗口', fileName);
+
+    jsContent = translateSettingsUi(jsContent, changes);
 
     jsContent = jsContent.replace(safeMegaRegex, (match, quote, en) => {
         changes.record('安全长句', en, safeGlobalDict[en], 1);
@@ -915,6 +1114,8 @@ function translate(paths) {
     const progress = createProgress(6);
     const changes = createChangeTracker();
     progress.update('准备汉化词库', '正在扫描可替换文本');
+
+    jsContent = translateSettingsUi(jsContent, changes);
 
     // 3. 安全长句：单次大正则替换
     jsContent = jsContent.replace(safeMegaRegex, (match, quote, en) => {
